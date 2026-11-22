@@ -784,7 +784,11 @@ class BaseTuner(nn.Module, ABC):
         return self.model
 
     def merge_and_unload(
-        self, progressbar: bool = False, safe_merge: bool = False, adapter_names: Optional[list[str]] = None
+        self,
+        progressbar: bool = False,
+        safe_merge: bool = False,
+        adapter_names: Optional[list[str]] = None,
+        verify_merge: bool = False,
     ) -> torch.nn.Module:
         r"""
         This method merges the adapter layers into the base model.
@@ -803,6 +807,11 @@ class BaseTuner(nn.Module, ABC):
             adapter_names (`List[str]`, *optional*):
                 The list of adapter names that should be merged. If None, all active adapters will be merged. Defaults
                 to `None`.
+            verify_merge (`bool`, *optional*, defaults to `False`):
+                If `True`, merge and unmerge the adapters once and check that the merged weights reproduce the
+                unmerged adapter output before the adapters are removed. Because unloading cannot be undone, the
+                check runs first; on failure [`~utils.error.MergeVerificationError`] is raised and the model is left
+                unmerged.
 
         Example:
 
@@ -817,6 +826,17 @@ class BaseTuner(nn.Module, ABC):
         >>> merged_model = model.merge_and_unload()
         ```
         """
+        if verify_merge:
+            from peft.utils import binding as binding_utils
+
+            binding_utils.verify_merge_inplace(
+                self.model,
+                merge_call=lambda: self.merge_adapter(adapter_names=adapter_names, safe_merge=safe_merge),
+                unmerge_call=self.unmerge_adapter,
+                adapter_names=adapter_names,
+                keep_merge=False,
+            )
+            binding_utils.clear_digest_cache(self)
         return self._unload_and_optionally_merge(
             progressbar=progressbar, safe_merge=safe_merge, adapter_names=adapter_names
         )
@@ -1416,6 +1436,7 @@ class BaseTuner(nn.Module, ABC):
             if isinstance(module, BaseTunerLayer):
                 with onload_layer(module):
                     module.merge(adapter_names=adapter_names, safe_merge=safe_merge)
+        self._invalidate_base_digest()
 
     def unmerge_adapter(self):
         """
@@ -1425,6 +1446,18 @@ class BaseTuner(nn.Module, ABC):
             if isinstance(module, BaseTunerLayer):
                 with onload_layer(module):
                     module.unmerge()
+        self._invalidate_base_digest()
+
+    def _invalidate_base_digest(self) -> None:
+        """Forget the memoized base-model digest: merging changes base weights in place via ``.data``, which does not
+        bump the tensor version counters the digest cache relies on."""
+        from peft.utils import binding as binding_utils
+
+        base = self.model
+        try:
+            delattr(base, binding_utils._DIGEST_CACHE_ATTR)
+        except AttributeError:
+            pass
 
     def set_adapter(self, adapter_name: str | list[str], inference_mode: bool = False) -> None:
         """Set the active adapter(s).

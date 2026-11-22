@@ -2710,6 +2710,16 @@ class TestPeftCustomModel(PeftCommonTester):
         self._test_load_multiple_adapters(model_id, config_cls, config_kwargs)
 
     @pytest.mark.parametrize("test_name, model_id, config_cls, config_kwargs", TEST_CASES)
+    def test_binding_roundtrip(self, test_name, model_id, config_cls, config_kwargs, tmp_path):
+        config_kwargs = set_init_weights_false(config_cls, config_kwargs)
+        self._test_binding_roundtrip(model_id, config_cls, config_kwargs, tmp_path)
+
+    @pytest.mark.parametrize("test_name, model_id, config_cls, config_kwargs", TEST_CASES)
+    def test_merge_layers_verified(self, test_name, model_id, config_cls, config_kwargs):
+        config_kwargs = set_init_weights_false(config_cls, config_kwargs)
+        self._test_merge_layers_verified(model_id, config_cls, config_kwargs)
+
+    @pytest.mark.parametrize("test_name, model_id, config_cls, config_kwargs", TEST_CASES)
     def test_merge_layers(self, test_name, model_id, config_cls, config_kwargs):
         _skip_if_merging_not_supported(model_id, config_cls, config_kwargs)
 

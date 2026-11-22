@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from .constants import ALLOWED_COMPUTE_DTYPES, UPCAST_DTYPES
-from .error import NoMatchingPeftModuleError, PeftError
+from .error import BindingError, MergeVerificationError, NoMatchingPeftModuleError, PeftError
 from .integrations import activation_checkpointing_enable, is_activation_checkpointing, map_cache_to_layer_device_map
 from .loftq_utils import replace_lora_weights_loftq, replace_lora_weights_pissa
 from .other import (
@@ -135,6 +135,8 @@ __all__ = [
     "UPCAST_DTYPES",
     "WEIGHTS_NAME",
     "AuxiliaryTrainingWrapper",
+    "BindingError",
+    "MergeVerificationError",
     "ModulesToSaveWrapper",
     "NoMatchingPeftModuleError",
     "PeftError",

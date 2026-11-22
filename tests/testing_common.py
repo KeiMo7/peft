@@ -657,6 +657,92 @@ class PeftCommonTester:
                 model.load_adapter(tmp_dirname, adapter_name="loaded", autocast_adapter_dtype=False)
                 assert get_adapter_dtype(model, "loaded") <= expected_dtype
 
+    def _test_binding_roundtrip(self, model_id, config_cls, config_kwargs, tmp_path):
+        # Save with binding metadata, reload on the same base (must verify), then tamper with the recorded digest (must
+        # be rejected). This runs for every PEFT method in the matrix.
+        from peft import BindingError
+        from peft.utils import binding as binding_utils
+
+        if issubclass(config_cls, PromptLearningConfig):
+            pytest.skip("Prompt learning has no tuner layers, so there is no adapter binding to verify.")
+        if getattr(config_cls, "is_adaption_prompt", False) is True:
+            pytest.skip("Adaption prompt does not write a binding record.")
+        # Same per-method/model restrictions as the existing merge/save tests (e.g. GPT-2's Conv1D target modules).
+        _skip_if_conv1d_not_supported(model_id, config_cls, config_kwargs)
+
+        with hub_online_once(model_id):
+            model = self.transformers_class.from_pretrained(model_id)
+            config = config_cls(base_model_name_or_path=model_id, **config_kwargs)
+            model = get_peft_model(model, config)
+            model.save_pretrained(tmp_path, save_binding=True)
+            record = binding_utils.read_binding(tmp_path)
+            assert record is not None
+            assert record["base_model"]["weight_digest"] is not None
+            assert record["target_modules"]
+
+            base_model = self.transformers_class.from_pretrained(model_id)
+            loaded = PeftModel.from_pretrained(base_model, tmp_path, verify_binding=True)
+            assert loaded.list_adapter_bindings()["default"]["status"] == "verified"
+
+            tampered = dict(record)
+            tampered["base_model"] = dict(record["base_model"], weight_digest="0" * 64)
+            with open(binding_utils.binding_path(tmp_path), "w", encoding="utf-8") as f:
+                json.dump(tampered, f)
+            base_model = self.transformers_class.from_pretrained(model_id)
+            with pytest.raises(BindingError, match="weight digest"):
+                PeftModel.from_pretrained(base_model, tmp_path, verify_binding=True)
+
+            # A module recorded for the adapter but absent from the base model must be reported, not skipped.
+            missing_record = dict(record)
+            missing_record["target_modules"] = list(record["target_modules"]) + ["definitely.not.a.module"]
+            with open(binding_utils.binding_path(tmp_path), "w", encoding="utf-8") as f:
+                json.dump(missing_record, f)
+            base_model = self.transformers_class.from_pretrained(model_id)
+            with pytest.raises(BindingError, match="do not exist in the base model"):
+                PeftModel.from_pretrained(base_model, tmp_path, verify_binding=True)
+
+    def _test_merge_layers_verified(self, model_id, config_cls, config_kwargs):
+        # `verify_merge=True` must produce the same output as an unverified merge for every mergeable method.
+        # Same applicability rules as the existing merge test.
+        _skip_if_merging_not_supported(model_id, config_cls, config_kwargs)
+        _skip_if_conv1d_not_supported(model_id, config_cls, config_kwargs)
+        dummy_input = self.prepare_inputs_for_testing()
+
+        with hub_online_once(model_id):
+            torch.manual_seed(0)
+            model = self.transformers_class.from_pretrained(model_id)
+            config = config_cls(base_model_name_or_path=model_id, **config_kwargs)
+            model = get_peft_model(model, config)
+            model = model.to(self.torch_device)
+            model.eval()
+            with torch.no_grad():
+                logits = model(**dummy_input)[0]
+
+            # If this method/model combination cannot merge at all, there is nothing to verify. Probe with an
+            # unverified merge so that this test does not have to duplicate every per-method merge restriction.
+            try:
+                model.merge_adapter()
+                model.unmerge_adapter()
+            except (NotImplementedError, ValueError, TypeError, AttributeError) as exc:
+                pytest.skip(f"Merging is not supported for {config_cls}: {exc}")
+
+            try:
+                model.merge_adapter(verify_merge=True)
+            except NotImplementedError:
+                pytest.skip(f"Merging is not implemented for {config_cls}")
+            with torch.no_grad():
+                logits_merged = model(**dummy_input)[0]
+            # The verified merge must reproduce the unverified path; the check itself uses a fixed synthetic input.
+            assert torch.allclose(logits, logits_merged, atol=1e-2, rtol=1e-2)
+            model.unmerge_adapter()
+            try:
+                merged = model.merge_and_unload(verify_merge=True)
+            except NotImplementedError:
+                pytest.skip(f"Merging is not implemented for {config_cls}")
+            with torch.no_grad():
+                logits_unloaded = merged(**dummy_input)[0]
+            assert torch.allclose(logits, logits_unloaded, atol=1e-2, rtol=1e-2)
+
     def _test_merge_layers_fp16(self, model_id, config_cls, config_kwargs):
         _skip_if_merging_not_supported(model_id, config_cls, config_kwargs)
         _skip_if_conv1d_not_supported(model_id, config_cls, config_kwargs)

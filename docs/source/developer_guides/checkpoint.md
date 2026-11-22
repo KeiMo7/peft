@@ -242,3 +242,75 @@ model_loaded.save_pretrained(<final_location>)
 model_loaded.push_to_hub(<final_location>)
 ```
 
+
+## Verify the adapter's base model binding
+
+A PEFT checkpoint only stores adapter weights. Nothing in it ties the weights to the exact base model they were trained on, so loading an adapter into a different revision of the base model, or into a model whose weights happen to share the config, produces wrong results without any error. This is opt-in binding verification.
+
+### Record the binding when saving
+
+Pass `save_binding=True` to [`~PeftModel.save_pretrained`]. Alongside the unchanged adapter weights and config, PEFT writes `adapter_binding.json`:
+
+```python
+model.save_pretrained("my_adapter", save_binding=True)
+```
+
+The file records:
+
+- `base_model.name` and `base_model.revision` as configured, and `base_model.weight_digest`, a content-based
+  SHA-256 digest over the base weights (names, dtypes, shapes, and bytes in sorted order),
+- `target_modules`, the exact modules the adapter was injected into,
+- `adapter.digest`, a digest of the adapter weights themselves.
+
+The adapter weight format (`adapter_model.safetensors` / `adapter_model.bin`) is not changed.
+
+### Verify when loading
+
+```python
+model = PeftModel.from_pretrained(base_model, "my_adapter", verify_binding=True)
+model.load_adapter("another_adapter", adapter_name="other", verify_binding=True)
+```
+
+With `verify_binding=True`, loading raises [`~utils.error.BindingError`] before the adapter is injected if:
+
+- the base model name or revision differs from the record,
+- the base weight digest differs,
+- a recorded target module does not exist on the base model (previously such a module was silently skipped),
+- the adapter conflicts with an already loaded adapter that targets the same module but is bound to a different
+  base model. The error names both adapters.
+
+Adapters without `adapter_binding.json` (saved by an older PEFT version, or without `save_binding=True`) are reported as having an unknown binding. Use `force_load=True` together with `verify_binding=True` to downgrade any of these failures to a warning and load anyway:
+
+```python
+model = PeftModel.from_pretrained(base_model, "legacy_adapter", verify_binding=True, force_load=True)
+```
+
+The check is off by default: without `verify_binding=True`, loading behaves exactly as before.
+
+### List the bindings of all adapters
+
+```python
+model.list_adapter_bindings()
+# {'alpha': {'status': 'verified', 'base_model': {...}, 'target_modules': [...], 'differences': [],
+#            'source': '...', 'active': True},
+#  'beta':  {'status': 'unknown', ...}}
+```
+
+`status` is `"verified"`, `"mismatch"`, or `"unknown"`. `differences` lists exactly what does not match the current base model.
+
+### Verify a merge
+
+```python
+model.merge_adapter(verify_merge=True)
+merged = model.merge_and_unload(verify_merge=True)
+```
+
+With `verify_merge=True`, PEFT runs a small deterministic synthetic input through the unmerged and the merged model and compares the outputs. If they differ, the merge is rolled back and [`~utils.error.MergeVerificationError`] is raised, leaving the model in its pre-merge state. The input is generated with a local fixed-seed generator, so the check never touches the global RNG state.
+
+### Limitations
+
+- Base weights that are sharded (e.g. FSDP2 / tensor-parallel `DTensor`) cannot be digested, because a local shard does not identify the global weights. Such records store `weight_digest: null`, and only the name, revision, and target modules are checked.
+- The digest is computed once per base model and memoized; it is recomputed after the base weights are changed in place.
+- `merge_and_unload` cannot be undone, so its check runs on a temporary merge that is unmerged again before the adapter is actually removed.
+- For models whose `forward` does not accept `input_ids` (for example encoder-decoder models), the merge check falls back to a merge/unmerge round trip: each touched base tensor must be restored exactly by the unmerge. This checks the merge against its own inverse, not against the adapter output.
+- Binding verification covers adapters that create tuner layers. Prompt-learning and adaption-prompt adapters do not write a binding record (`save_binding=True` skips them), because their identity is already fully described by `adapter_config.json`.

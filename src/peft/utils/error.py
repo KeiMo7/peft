@@ -25,3 +25,22 @@ class NoMatchingPeftModuleError(PeftError, ValueError):
     error raised previously. Code that adds such an adapter intentionally can catch this error (or `PeftError`) and
     proceed.
     """
+
+
+class BindingError(PeftError, ValueError):
+    """The binding between an adapter and the base model could not be verified.
+
+    Adapter binding verification is opt-in. It is triggered by `verify_binding=True` on
+    [`~PeftModel.from_pretrained`] and [`~PeftModel.load_adapter`], and by `verify_merge=True` on the merge methods.
+    The error is raised when the base model, the targeted modules, the adapter weights, or the bindings of coexisting
+    adapters do not match the metadata recorded when the adapter was saved. Use `force_load=True` to downgrade these
+    errors to warnings.
+    """
+
+
+class MergeVerificationError(BindingError):
+    """An adapter merge was verified and did not reproduce the adapter's output.
+
+    Raised by `merge_adapter(verify_merge=True)` and `merge_and_unload(verify_merge=True)`. The merge is rolled back
+    before the error is raised, so the model is left in its pre-merge state.
+    """

@@ -73,6 +73,7 @@ from .utils import (
     set_peft_model_state_dict,
     shift_tokens_right,
 )
+from .utils import binding as binding_utils
 
 
 def _get_layer_kv_target_shape(base_config, layer_idx: int) -> tuple[int, int] | None:
@@ -302,6 +303,7 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         save_embedding_layers: Union[str, bool] = "auto",
         is_main_process: bool = True,
         path_initial_model_for_weight_conversion: Optional[str] = None,
+        save_binding: bool = False,
         **kwargs: Any,
     ) -> None:
         r"""
@@ -338,6 +340,11 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 adapters. Note that this conversion is not supported if `rslora` is used in combination with
                 `rank_pattern` or `alpha_pattern`. See [`peft.tuners.lora.LoraModel.subtract_mutated_init`] for more
                 information.
+            save_binding (`bool`, *optional*, defaults to `False`):
+                If `True`, additionally write `adapter_binding.json` next to each adapter. It records the base model
+                name and revision, a content-based digest of the base weights, the modules the adapter targets, and a
+                digest of the adapter weights. The adapter weight format is unchanged. The record is used by
+                `from_pretrained(verify_binding=True)` and `load_adapter(verify_binding=True)`.
             kwargs (additional keyword arguments, *optional*):
                 Additional keyword arguments passed along to the `push_to_hub` method.
 
@@ -478,6 +485,10 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 finally:
                     peft_config.inference_mode = inference_mode
 
+                if save_binding and not peft_config.is_prompt_learning and not peft_config.is_adaption_prompt:
+                    binding = binding_utils.build_binding(self, adapter_name, output_state_dict, peft_config)
+                    binding_utils.save_binding(output_dir, binding)
+
     @classmethod
     def from_pretrained(
         cls,
@@ -491,6 +502,8 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         low_cpu_mem_usage: bool = False,
         key_mapping: Optional[dict[str, str]] = None,
         strict_adapter_check: Literal["warn", "error", "ignore"] = "warn",
+        verify_binding: bool = False,
+        force_load: bool = False,
         **kwargs: Any,
     ) -> Self:
         r"""
@@ -542,6 +555,17 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 does nothing. This is not the same check as `torch.nn.Module.load_state_dict`'s `strict`: PEFT adapters
                 always coexist with a frozen base model, so this only concerns adapter-specific keys, never the base
                 model's own parameters.
+            verify_binding (`bool`, *optional*, defaults to `False`):
+                If `True`, verify that the adapter was saved for this base model. The check uses `adapter_binding.json`
+                (written by `save_pretrained(save_binding=True)`) and compares the base model name, revision, a
+                content-based digest of the base weights, and the adapter's target modules. A mismatch raises
+                [`~utils.error.BindingError`]. Adapters without a binding record (e.g. saved by an older PEFT version)
+                are loaded with a warning unless `force_load` is set. Multiple adapters are additionally checked for
+                conflicts: two adapters that target the same module must be bound to the same base model.
+            force_load (`bool`, *optional*, defaults to `False`):
+                If `True`, binding mismatches are emitted as warnings instead of raising [`~utils.error.BindingError`].
+                Only meaningful together with `verify_binding=True`. To load an adapter without any metadata (for
+                example one saved by an older PEFT version), pass both `verify_binding=True, force_load=True`.
             kwargs: (`optional`):
                 Additional keyword arguments passed along to the specific PEFT configuration class. This includes
                 `torch_device` (`str`, *optional*): the device to load the adapter on (forwarded to
@@ -678,6 +702,8 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             low_cpu_mem_usage=low_cpu_mem_usage,
             key_mapping=key_mapping,
             strict_adapter_check=strict_adapter_check,
+            verify_binding=verify_binding,
+            force_load=force_load,
             **kwargs,
         )
 
@@ -1561,6 +1587,8 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         low_cpu_mem_usage: bool = False,
         key_mapping: Optional[dict[str, str]] = None,
         strict_adapter_check: Literal["warn", "error", "ignore"] = "warn",
+        verify_binding: bool = False,
+        force_load: bool = False,
         **kwargs: Any,
     ):
         """
@@ -1606,6 +1634,13 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 does nothing. This is not the same check as `torch.nn.Module.load_state_dict`'s `strict`: PEFT adapters
                 always coexist with a frozen base model, so this only concerns adapter-specific keys, never the base
                 model's own parameters.
+            verify_binding (`bool`, *optional*, defaults to `False`):
+                Verify the adapter's `adapter_binding.json` against this base model before its weights are loaded. See
+                [`~PeftModel.from_pretrained`] for details. Adapters that target modules the base model does not have,
+                or that were saved without a binding record, raise [`~utils.error.BindingError`] unless `force_load`
+                is set.
+            force_load (`bool`, *optional*, defaults to `False`):
+                Downgrade binding mismatches to warnings.
             kwargs: (`optional`):
                 Additional arguments to modify the way the adapter is loaded, e.g. the token for Hugging Face Hub.
         """
@@ -1619,6 +1654,19 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         hf_hub_download_kwargs, kwargs = self._split_kwargs(kwargs)
         if torch_device is None:
             torch_device = infer_device()
+
+        binding_check = None
+        if verify_binding:
+            # Read the metadata before the adapter is injected: a mismatch must not leave a half-injected model. The
+            # target-module check runs before injection too, so no adapter layer is created for a module that is not
+            # part of the recorded binding.
+            binding_check = binding_utils.prepare_binding_check(
+                self,
+                model_id,
+                adapter_name,
+                force_load=force_load,
+                hf_hub_download_kwargs=hf_hub_download_kwargs,
+            )
 
         if adapter_name not in self.peft_config:
             # load the config
@@ -1665,6 +1713,9 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 ignore_mismatched_sizes=ignore_mismatched_sizes,
                 low_cpu_mem_usage=low_cpu_mem_usage,
             )
+
+        if binding_check is not None:
+            self._finalize_binding_check(adapter_name, model_id, binding_check, force_load=force_load)
 
         adapter_config = self.peft_config[adapter_name]
         tuner = adapter_config.peft_type
@@ -1770,6 +1821,73 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         if not is_trainable:
             self.eval()
         return load_result
+
+    def _finalize_binding_check(
+        self,
+        adapter_name: str,
+        model_id: Union[str, os.PathLike],
+        recorded: dict[str, Any],
+        *,
+        force_load: bool,
+    ) -> None:
+        """Complete a binding check once the adapter is injected and its weights are loaded."""
+        if recorded.get("status") == "unknown":
+            return
+        binding_utils.verify_target_modules(recorded, self, adapter_name, force_load=force_load)
+        binding_utils.check_conflicts(self, adapter_name, recorded, force_load=force_load)
+        if not hasattr(self, "_adapter_bindings"):
+            self._adapter_bindings = {}
+            self._adapter_binding_sources = {}
+        self._adapter_bindings[adapter_name] = recorded
+        self._adapter_binding_sources[adapter_name] = os.fspath(model_id)
+
+    def list_adapter_bindings(self) -> dict[str, dict[str, Any]]:
+        """Describe which base model each loaded adapter is bound to.
+
+        Reads `adapter_binding.json` from the location each adapter was loaded from. Adapters saved without
+        `save_binding=True` (or with an older PEFT version) are reported with ``"status": "unknown"``.
+
+        Returns:
+            `dict`: A mapping from adapter name to binding information:
+                - ``status``: ``"verified"``, ``"mismatch"``, or ``"unknown"``.
+                - ``base_model``: the recorded base model name, revision, and weight digest (or ``None``).
+                - ``target_modules``: the modules the adapter targets (or ``None`` if unknown).
+                - ``differences``: the list of differences to the current base model, empty when it matches.
+                - ``source``: where the binding record was read from.
+                - ``active``: whether this adapter is currently active.
+        """
+        stored = getattr(self, "_adapter_bindings", {}) or {}
+        sources = getattr(self, "_adapter_binding_sources", {}) or {}
+        current = binding_utils.current_binding(self)
+        listing: dict[str, dict[str, Any]] = {}
+        for adapter_name in self.peft_config:
+            record = stored.get(adapter_name)
+            source = sources.get(adapter_name)
+            if record is None and source is not None:
+                try:
+                    record = binding_utils.read_binding(source)
+                except (OSError, ValueError):
+                    record = None
+            if record is None:
+                listing[adapter_name] = {
+                    "status": "unknown",
+                    "base_model": None,
+                    "target_modules": None,
+                    "differences": [],
+                    "source": source,
+                    "active": adapter_name in self.active_adapters,
+                }
+                continue
+            differences = binding_utils.compare_bindings(record, current)
+            listing[adapter_name] = {
+                "status": "mismatch" if differences else "verified",
+                "base_model": record.get("base_model"),
+                "target_modules": record.get("target_modules"),
+                "differences": differences,
+                "source": source,
+                "active": adapter_name in self.active_adapters,
+            }
+        return listing
 
     def set_adapter(self, adapter_name: str, inference_mode: bool = False) -> None:
         """
@@ -1911,7 +2029,11 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             raise TypeError("Merging is not supported for adaption prompt.")
 
     def merge_adapter(
-        self, adapter_names: Optional[list[str]] = None, safe_merge: bool = False, **kwargs: Any
+        self,
+        adapter_names: Optional[list[str]] = None,
+        safe_merge: bool = False,
+        verify_merge: bool = False,
+        **kwargs: Any,
     ) -> None:
         """
         Merge the active adapters into the base model.
@@ -1932,6 +2054,10 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 If `True`, the merge operation will be performed in a copy of the original weights and check for NaNs
                 before merging the weights. This is useful if you want to check if the merge operation will produce
                 NaNs. Defaults to `False`.
+            verify_merge (`bool`, *optional*, defaults to `False`):
+                If `True`, after merging, check that the merged weights reproduce the output of the unmerged adapter on
+                a small synthetic input. If they do not, undo the merge and raise
+                [`~utils.error.MergeVerificationError`]. The merge is kept when the check passes.
         """
         self._check_merge_allowed()
         # The merge has to end up in the weights that FSDP2 keeps, i.e. the shards. A forward with
@@ -1939,7 +2065,20 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         # by the next reshard, see #3800. Resharding is safe even if a layer is already merged, because the merge is
         # written in place into the sharded parameters.
         self._reshard_fsdp_modules(include_merged=True)
-        self.base_model.merge_adapter(adapter_names=adapter_names, safe_merge=safe_merge, **kwargs)
+        if not verify_merge:
+            self.base_model.merge_adapter(adapter_names=adapter_names, safe_merge=safe_merge, **kwargs)
+            binding_utils.clear_digest_cache(self)
+            return
+        binding_utils.verify_merge_inplace(
+            self.get_base_model(),
+            merge_call=lambda: self.base_model.merge_adapter(
+                adapter_names=adapter_names, safe_merge=safe_merge, **kwargs
+            ),
+            unmerge_call=self.base_model.unmerge_adapter,
+            adapter_names=adapter_names,
+        )
+        # The merge changed the base weights in place; the memoized digest no longer describes them.
+        binding_utils.clear_digest_cache(self)
 
     def unmerge_adapter(self, force_reshard: bool = False, **kwargs: Any) -> None:
         """
@@ -1964,6 +2103,7 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         if force_reshard or any(isinstance(module, BaseTunerLayer) and module.merged for module in self.modules()):
             self._reshard_fsdp_modules(include_merged=True)
         self.base_model.unmerge_adapter(**kwargs)
+        binding_utils.clear_digest_cache(self)
 
     @property
     def base_model_torch_dtype(self):
