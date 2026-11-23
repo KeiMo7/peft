@@ -1426,6 +1426,77 @@ class BaseTuner(nn.Module, ABC):
                 with onload_layer(module):
                     module.unmerge()
 
+    @property
+    def reversible_merge_registry(self):
+        """Lazily created registry holding the reversible-merge bookkeeping.
+
+        The registry is only instantiated when a reversible merge is actually used, so models that keep using the
+        regular merge API carry no extra state.
+        """
+        from .reversible_merge import ReversibleMergeRegistry
+
+        registry = self.__dict__.get("_reversible_merge_registry")
+        if registry is None:
+            registry = ReversibleMergeRegistry()
+            self._reversible_merge_registry = registry
+        return registry
+
+    def merge_adapter_reversible(
+        self, adapter_names: Optional[list[str]] = None, *, upcast_merge: bool = True
+    ) -> None:
+        """
+        Merge the adapters into the base weights while keeping an exact snapshot that allows a bit-for-bit unmerge.
+
+        Unlike :meth:`merge_adapter` / :meth:`unmerge_adapter`, whose in-place add/subtract accumulates rounding
+        error in float16/bfloat16 (and therefore drifts over repeated merge/unmerge cycles), the reversible merge
+        stores a copy of every affected base parameter before merging. :meth:`unmerge_adapter_reversible` restores
+        those copies exactly, so the round-trip error of the base weights is zero regardless of how many cycles are
+        performed and without reloading the base checkpoint.
+
+        The merge is atomic: if any layer fails (unsupported layer type, non-finite values, ...), all layers touched
+        by the call are rolled back and the model is left in its pre-merge state.
+
+        Args:
+            adapter_names (`list[str]`, *optional*):
+                The list of adapter names that should be merged. If `None`, all active adapters will be merged.
+            upcast_merge (`bool`, *optional*):
+                If `True` (default), the merge arithmetic of float16/bfloat16 base weights is performed in float32
+                and cast back once, reducing the error of the merged weights. Base and snapshot dtypes are unchanged.
+        """
+        from .reversible_merge import reversible_merge
+
+        self._check_merge_allowed()
+        reversible_merge(
+            self, adapter_names=adapter_names, upcast_merge=upcast_merge, registry=self.reversible_merge_registry
+        )
+
+    def unmerge_adapter_reversible(self) -> None:
+        """
+        Restore the base weights bit-for-bit from the snapshots taken by :meth:`merge_adapter_reversible`.
+
+        Raises:
+            ReversibleMergeError: if the merged weights have been modified externally since the merge, or if the
+                recorded state does not match the current model. The model is left unchanged in that case.
+        """
+        from .reversible_merge import reversible_unmerge
+
+        self._check_merge_allowed()
+        registry = self.__dict__.get("_reversible_merge_registry")
+        if registry is None or not registry.merged_layer_names():
+            warnings.warn("No reversibly merged layers found. Nothing to do.")
+            return
+        reversible_unmerge(self, registry=registry)
+
+    def reversible_merge_status(self) -> dict:
+        """
+        Return a JSON-serializable summary of the reversible-merge state: which layers are merged, which adapters
+        each layer contains and how many merge/unmerge round trips have been recorded.
+        """
+        registry = self.__dict__.get("_reversible_merge_registry")
+        if registry is None:
+            return {"merged": False, "upcast_merge": True, "total_layers": 0, "layers": []}
+        return registry.status()
+
     def set_adapter(self, adapter_name: str | list[str], inference_mode: bool = False) -> None:
         """Set the active adapter(s).
 

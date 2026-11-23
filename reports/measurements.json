@@ -1,0 +1,160 @@
+{
+  "dtypes": {
+    "float32": {
+      "reversible": {
+        "single_round_trip_max_weight_diff": 0.0,
+        "single_round_trip_max_output_diff": 0.0,
+        "merged_vs_unmerged_output_diff": {
+          "max": 2.384185791015625e-07,
+          "mean": 5.157198756933212e-08,
+          "p50": 4.470348358154297e-08,
+          "p90": 1.1920928955078125e-07,
+          "p99": 2.008676887044203e-07,
+          "numel": 64
+        },
+        "merged_outputs_allclose_tol": {
+          "atol": 1e-06,
+          "allclose": true
+        },
+        "drift_per_cycle": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_after_10_cycles": 0.0,
+        "bound": "exactly 0 at every cycle (snapshot restore)"
+      },
+      "legacy": {
+        "single_round_trip_max_weight_diff": 1.4901161193847656e-08,
+        "drift_per_cycle": [
+          1.4901161193847656e-08,
+          1.4901161193847656e-08,
+          1.4901161193847656e-08,
+          1.4901161193847656e-08,
+          1.4901161193847656e-08,
+          1.4901161193847656e-08,
+          1.4901161193847656e-08,
+          1.4901161193847656e-08,
+          1.4901161193847656e-08,
+          1.4901161193847656e-08
+        ],
+        "drift_after_10_cycles": 1.4901161193847656e-08,
+        "growth_factor_10_over_1": 1.0
+      }
+    },
+    "float16": {
+      "reversible": {
+        "single_round_trip_max_weight_diff": 0.0,
+        "single_round_trip_max_output_diff": 0.0,
+        "merged_vs_unmerged_output_diff": {
+          "max": 0.00048828125,
+          "mean": 0.00010371208190917969,
+          "p50": 6.103515625e-05,
+          "p90": 0.000244140625,
+          "p99": 0.00048828125,
+          "numel": 64
+        },
+        "merged_outputs_allclose_tol": {
+          "atol": 0.005,
+          "allclose": true
+        },
+        "drift_per_cycle": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_after_10_cycles": 0.0,
+        "bound": "exactly 0 at every cycle (snapshot restore)"
+      },
+      "legacy": {
+        "single_round_trip_max_weight_diff": 0.0001220703125,
+        "drift_per_cycle": [
+          0.0001220703125,
+          0.0001220703125,
+          0.00018310546875,
+          0.000244140625,
+          0.00030517578125,
+          0.0003662109375,
+          0.00042724609375,
+          0.00048828125,
+          0.00054931640625,
+          0.0006103515625
+        ],
+        "drift_after_10_cycles": 0.0006103515625,
+        "growth_factor_10_over_1": 5.0
+      }
+    },
+    "bfloat16": {
+      "reversible": {
+        "single_round_trip_max_weight_diff": 0.0,
+        "single_round_trip_max_output_diff": 0.0,
+        "merged_vs_unmerged_output_diff": {
+          "max": 0.0078125,
+          "mean": 0.001264333724975586,
+          "p50": 0.0009765625,
+          "p90": 0.003613279666751623,
+          "p99": 0.0078125,
+          "numel": 64
+        },
+        "merged_outputs_allclose_tol": {
+          "atol": 0.02,
+          "allclose": true
+        },
+        "drift_per_cycle": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_after_10_cycles": 0.0,
+        "bound": "exactly 0 at every cycle (snapshot restore)"
+      },
+      "legacy": {
+        "single_round_trip_max_weight_diff": 0.0009765625,
+        "drift_per_cycle": [
+          0.0009765625,
+          0.001953125,
+          0.0029296875,
+          0.00390625,
+          0.0048828125,
+          0.005859375,
+          0.0068359375,
+          0.0078125,
+          0.0087890625,
+          0.009765625
+        ],
+        "drift_after_10_cycles": 0.009765625,
+        "growth_factor_10_over_1": 10.0
+      }
+    }
+  },
+  "legacy_vs_reversible_10_cycles": {},
+  "save_load": {
+    "sidecar_files": [
+      "reversible_merge_state.json",
+      "reversible_merge_state.safetensors"
+    ],
+    "exact_weight_restore": true,
+    "exact_output_restore": true
+  }
+}

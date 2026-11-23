@@ -478,6 +478,15 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 finally:
                     peft_config.inference_mode = inference_mode
 
+        # Persist the reversible-merge snapshots next to the first selected adapter, if a reversible merge is
+        # currently active. A model without a live reversible merge writes nothing new, keeping its checkpoint
+        # format intact.
+        registry = getattr(self.base_model, "_reversible_merge_registry", None)
+        if is_main_process and registry and registry.merged_layer_names():
+            first_adapter = selected_adapters[0]
+            sidecar_dir = os.path.join(save_directory, first_adapter) if first_adapter != "default" else save_directory
+            registry.save(sidecar_dir)
+
     @classmethod
     def from_pretrained(
         cls,
@@ -1705,6 +1714,9 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             # careful: if the wording of the warning is changed, adjust the unit tests accordingly!
             warnings.warn(f"{hint}Found {problems} while loading the checkpoint.")
 
+        if hasattr(self, "_maybe_load_reversible_merge_state"):
+            self._maybe_load_reversible_merge_state(model_id, adapter_name)
+
         if (
             (getattr(self, "hf_device_map", None) is not None)
             and (len(set(self.hf_device_map.values()).intersection({"cpu", "disk"})) > 0)
@@ -1770,6 +1782,44 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         if not is_trainable:
             self.eval()
         return load_result
+
+    def _maybe_load_reversible_merge_state(self, model_id: Union[str, os.PathLike], adapter_name: str) -> None:
+        """Restore reversible-merge snapshots from a checkpoint sidecar, if present.
+
+        The sidecar lives next to the adapter files. Loading it re-attaches the bookkeeping so that
+        :meth:`unmerge_adapter_reversible` works on a different machine without the original base checkpoint.
+        """
+        from peft.tuners.reversible_merge import ReversibleMergeError, ReversibleMergeRegistry
+
+        # The sidecar is only written next to the first selected adapter (see save_pretrained); when several
+        # adapters are loaded from separate directories, look there instead of in every adapter directory.
+        candidate_dirs = [model_id]
+        if adapter_name != "default":
+            candidate_dirs.append(os.path.join(model_id, adapter_name))
+        sidecar_dir = next(
+            (d for d in candidate_dirs if ReversibleMergeRegistry.sidecar_exists(d)),
+            None,
+        )
+        if sidecar_dir is None:
+            return
+
+        registry = ReversibleMergeRegistry.load(sidecar_dir)
+        layers = {
+            name.removeprefix("model."): module
+            for name, module in self.base_model.named_modules()
+            if isinstance(module, BaseTunerLayer)
+        }
+        missing = [state.layer_name for state in registry.states.values() if state.layer_name not in layers]
+        if missing:
+            raise ReversibleMergeError(
+                "Cannot restore reversible-merge state: layers recorded in the checkpoint are missing from the "
+                f"current model: {missing}"
+            )
+        # Re-attach the bookkeeping and mark the layers as merged. The base weights in the checkpoint are already
+        # the merged weights, so no arithmetic is performed here.
+        for layer_name, state in registry.states.items():
+            layers[layer_name].merged_adapters = list(state.merged_adapters)
+        self.base_model._reversible_merge_registry = registry
 
     def set_adapter(self, adapter_name: str, inference_mode: bool = False) -> None:
         """
@@ -1964,6 +2014,39 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         if force_reshard or any(isinstance(module, BaseTunerLayer) and module.merged for module in self.modules()):
             self._reshard_fsdp_modules(include_merged=True)
         self.base_model.unmerge_adapter(**kwargs)
+
+    def merge_adapter_reversible(
+        self, adapter_names: Optional[list[str]] = None, *, upcast_merge: bool = True, **kwargs: Any
+    ) -> None:
+        """
+        Merge the adapters with exact, snapshot-based reversibility.
+
+        Same FSDP2 considerations as :meth:`merge_adapter` apply. The pre-merge base weights are snapshotted, so
+        :meth:`unmerge_adapter_reversible` restores them bit-for-bit without reloading the base checkpoint and
+        without rounding drift accumulating over repeated merge/unmerge cycles. The merge is atomic: a failure on
+        any layer rolls back every layer touched by the call.
+
+        Args:
+            adapter_names (`list[str]`, *optional*):
+                The list of adapter names that should be merged. If `None`, all active adapters will be merged.
+            upcast_merge (`bool`, *optional*):
+                If `True` (default), float16/bfloat16 merge arithmetic is performed in float32 and cast back once.
+        """
+        self._check_merge_allowed()
+        self._reshard_fsdp_modules(include_merged=True)
+        self.base_model.merge_adapter_reversible(adapter_names=adapter_names, upcast_merge=upcast_merge, **kwargs)
+
+    def unmerge_adapter_reversible(self, **kwargs: Any) -> None:
+        """Restore the base weights exactly from the reversible-merge snapshots."""
+        self._check_merge_allowed()
+        registry = getattr(self.base_model, "_reversible_merge_registry", None)
+        if registry and any(isinstance(module, BaseTunerLayer) and module.merged for module in self.modules()):
+            self._reshard_fsdp_modules(include_merged=True)
+        self.base_model.unmerge_adapter_reversible(**kwargs)
+
+    def reversible_merge_status(self) -> dict:
+        """Report which layers are reversibly merged, their adapters and the recorded round-trip counts."""
+        return self.base_model.reversible_merge_status()
 
     @property
     def base_model_torch_dtype(self):
